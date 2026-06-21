@@ -19,30 +19,121 @@
     #root{min-height:100%}
     ::-webkit-scrollbar{display:none}
     button{-webkit-appearance:none;appearance:none;outline:none}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+    .speaking{animation:pulse 1s ease-in-out infinite}
   </style>
 </head>
 <body>
 <div id="root"></div>
 <script>
-// ── JSX不使用・Babel不要・純粋なReact.createElement ──────────────────────
+
 const e = React.createElement;
-const { useState, useEffect } = React;
+const { useState, useEffect, useRef, useCallback } = React;
 
 // ── カラー ──────────────────────────────────────────────────────────────────
 const C = {
   bg:"#0d0f14",card:"#161920",border:"#252a36",
   accent:"#c8a96e",accentDim:"#8a7248",
   text:"#e8e2d6",muted:"#7a7a8a",dim:"#4a4a5a",
-  green:"#4caf7d",red:"#d97b7b",
+  green:"#4caf7d",red:"#d97b7b",blue:"#5b8dd9",
   cat:{"国内政治":"#5b8dd9","経済・産業":"#c8a96e","社会・法律":"#7dc8a9","国際情勢":"#d97b5b","科学・環境":"#a97dc8"}
 };
 
-// ── localStorage ────────────────────────────────────────────────────────────
+// ── localStorage ─────────────────────────────────────────────────────────────
 const KEY = "tokubetsu_done_v2";
 function loadDone(){try{const r=localStorage.getItem(KEY);if(!r)return new Set();const a=JSON.parse(r);return Array.isArray(a)?new Set(a):new Set();}catch{return new Set();}}
 function saveDone(s){try{localStorage.setItem(KEY,JSON.stringify([...s]));}catch{}}
 
-// ── 問題データ ───────────────────────────────────────────────────────────────
+// ── Web Audio API 効果音 ──────────────────────────────────────────────────────
+let _actx = null;
+function getACtx(){
+  if(!_actx){
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if(AC) _actx = new AC();
+  }
+  if(_actx && _actx.state === "suspended") _actx.resume();
+  return _actx;
+}
+
+// 確認音（正解ding）: 心地よい上昇音
+function playDing(){
+  try{
+    const ctx = getACtx(); if(!ctx) return;
+    const t = ctx.currentTime;
+    const osc1 = ctx.createOscillator();
+    const osc2 = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc1.type = "sine"; osc2.type = "sine";
+    osc1.connect(gain); osc2.connect(gain); gain.connect(ctx.destination);
+    osc1.frequency.setValueAtTime(660, t);
+    osc1.frequency.exponentialRampToValueAtTime(880, t+0.08);
+    osc2.frequency.setValueAtTime(990, t+0.08);
+    osc2.frequency.exponentialRampToValueAtTime(1320, t+0.22);
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(0.25, t+0.02);
+    gain.gain.exponentialRampToValueAtTime(0.001, t+0.45);
+    osc1.start(t); osc1.stop(t+0.12);
+    osc2.start(t+0.08); osc2.stop(t+0.45);
+  }catch(err){}
+}
+
+// カードめくり音: 短いシュッ
+function playFlip(){
+  try{
+    const ctx = getACtx(); if(!ctx) return;
+    const t = ctx.currentTime;
+    const buf = ctx.createBuffer(1, ctx.sampleRate*0.08, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for(let i=0;i<data.length;i++) data[i]=(Math.random()*2-1)*Math.pow(1-i/data.length,2)*0.3;
+    const src = ctx.createBufferSource();
+    const gain = ctx.createGain();
+    const filter = ctx.createBiquadFilter();
+    filter.type = "highpass"; filter.frequency.value = 2000;
+    src.buffer = buf;
+    src.connect(filter); filter.connect(gain); gain.connect(ctx.destination);
+    gain.gain.setValueAtTime(0.6, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t+0.08);
+    src.start(t);
+  }catch(err){}
+}
+
+// ナビ音: 軽いクリック
+function playClick(){
+  try{
+    const ctx = getACtx(); if(!ctx) return;
+    const t = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine"; osc.frequency.value = 500;
+    osc.connect(gain); gain.connect(ctx.destination);
+    gain.gain.setValueAtTime(0.12, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t+0.06);
+    osc.start(t); osc.stop(t+0.06);
+  }catch(err){}
+}
+
+// ── Web Speech API 読み上げ ──────────────────────────────────────────────────
+let _speaking = false;
+function speak(text, onStart, onEnd){
+  if(!window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+  const utt = new SpeechSynthesisUtterance(text);
+  utt.lang = "ja-JP";
+  utt.rate = 1.15;
+  utt.pitch = 1.0;
+  // 日本語の声を優先して選択
+  const voices = window.speechSynthesis.getVoices();
+  const jaVoice = voices.find(v=>v.lang.startsWith("ja") && v.localService) ||
+                  voices.find(v=>v.lang.startsWith("ja"));
+  if(jaVoice) utt.voice = jaVoice;
+  utt.onstart = ()=>{ _speaking=true; if(onStart) onStart(); };
+  utt.onend = ()=>{ _speaking=false; if(onEnd) onEnd(); };
+  utt.onerror = ()=>{ _speaking=false; if(onEnd) onEnd(); };
+  window.speechSynthesis.speak(utt);
+}
+function stopSpeak(){ if(window.speechSynthesis) window.speechSynthesis.cancel(); _speaking=false; }
+
+// ── 問題データ ────────────────────────────────────────────────────────────────
 const QS = [
   {id:1,cat:"国内政治",q:"2025年10月に誕生した高市早苗内閣の歴史的意義は何か？",a:"日本憲政史上初の女性内閣総理大臣の誕生。",d:"高市早苗氏が第102代内閣総理大臣に就任（10月21日）。自民党と日本維新の会による連立政権を樹立。公明党は連立を離脱した。内閣支持率は各社70%前後の高水準を記録。"},
   {id:2,cat:"国内政治",q:"高市首相が所信表明演説で議論開始を表明した税制上の仕組みは何か？",a:"給付付き税額控除。",d:"税額控除額が税額を上回った場合に差額を現金給付する制度。低所得者への再分配効果が期待される。欧米では広く採用されており、日本版の設計をめぐる議論が始まった。"},
@@ -59,7 +150,7 @@ const QS = [
   {id:13,cat:"経済・産業",q:"2025年10月に達成された最低賃金の歴史的出来事は何か？",a:"47都道府県すべてで最低賃金が時給1,000円を超えた（史上初）。",d:"政府が「2020年代に全国平均1,500円」を目標として掲げており、1,000円超えはその通過点。全国加重平均の引き上げ額は過去最大水準。"},
   {id:14,cat:"経済・産業",q:"日経平均株価が5万円・6万円を突破したのはそれぞれいつか？",a:"5万円突破：2025年10月27日。6万円突破：2026年4月27日。5月7日には6.3万円も突破。",d:"高市政権発足後の経済政策への期待感が追い風となり株価が上昇。株価上昇の要因は複合的（※未確認）。"},
   {id:15,cat:"経済・産業",q:"2026年5月に達成されたトヨタ自動車に関する経済上の記録は何か？",a:"年間売上高が日本企業として史上初めて50兆円を突破した（5月8日）。",d:"日本の製造業の象徴的な出来事。円安効果や海外市場での好調が寄与したとみられる（※未確認）。"},
-  {id:16,cat:"経済・産業",q:"2026年2月に成功した日本の資源政策上の重要な出来事は何か？",a:"海洋研究開発機構が南鳥島（東京都小笠原村）沖の海底でレアアース（希土類元素）の試掘に初めて成功した（2月2日）。",d:"レアアースは電子部品・電気自動車のモーター・半導体などに不可欠な希少金属の総称。中国が世界の生産量の大半を占めており調達リスクが日本の課題だった。南鳥島沖には世界有数の埋蔵量があるとされる。"},
+  {id:16,cat:"経済・産業",q:"2026年2月に成功した日本の資源政策上の重要な出来事は何か？",a:"海洋研究開発機構が南鳥島（東京都小笠原村）沖の海底でレアアース（希土類元素）の試掘に初めて成功した（2月2日）。",d:"レアアースは電子部品・電気自動車のモーター・半導体などに不可欠な希少金属の総称。中国が世界の生産量の大半を占めており調達リスクが日本の課題だった。"},
   {id:17,cat:"経済・産業",q:"JR東日本の運賃値上げはいつか。都市部での値上げ幅は？",a:"2026年3月14日。都市部では10%以上の大幅な値上げとなった。",d:"人件費の増加・設備更新費用の増大が主な要因。都心部の通勤・通学コストの増加が家計に影響するとして注目された。"},
   {id:18,cat:"経済・産業",q:"大阪・関西万博の閉幕日・総来場者数・世界初・世界最大の特徴を述べよ。",a:"閉幕：2025年10月13日。来場者：約2,900万人超。世界初：国際博覧会で初の全面キャッシュレス。世界最大：大屋根リング（木造建築・1周2km・ギネス記録）。",d:"158の国・地域、7の国際機関が参加（ロシアは不参加）。国内での大規模万博は1970年大阪万博、2005年愛知万博に続いて3度目。"},
   {id:19,cat:"経済・産業",q:"2025年の訪日外国人数はどの水準に達したか？政府の2030年目標は？",a:"2025年の訪日外国人旅行者数が初めて4,000万人を超えた（2026年1月21日公表）。政府の2030年目標は6,000万人・消費額15兆円。",d:"2024年は3,687万人で過去最多を更新していたが2025年はさらに増加。"},
@@ -73,33 +164,30 @@ const QS = [
   {id:27,cat:"社会・法律",q:"2025年の出生数と政府推計との比較はどのようなものか？",a:"2025年の出生数は過去最低の70万人。政府中位推計では70万人台は2041年の見通しであり、少子化が推計より約16年早いペース。",d:"2024年が72万人で過去最低だったが2025年にさらに減少。婚姻数の低迷が少子化の根本要因の一つ。"},
   {id:28,cat:"社会・法律",q:"2026年2月に実現した薬の販売方法に関する制度変更は何か？",a:"緊急避妊薬「ノルレボ」の薬局での一般販売が開始された（2月2日）。購入者は女性かつ本人に限定。",d:"これまでは医師の処方箋が必要だったが薬局のカウンターで購入できるOTC医薬品（市販薬）として解禁。"},
   {id:29,cat:"社会・法律",q:"2025年4月に施行された情報流通プラットフォーム対処法の主な内容は？",a:"月平均利用者1,000万人超のSNS等事業者に対し、投稿の削除申請窓口の設置を義務化。7日以内に可否の通知も義務化。違反には1億円以下の罰金。",d:"ネット上の誹謗中傷・権利侵害への対応強化を目的とした法律。削除基準の策定・運用状況の公表も義務化。闇バイト・詐欺に関する投稿も削除対象となった。"},
-  {id:30,cat:"社会・法律",q:"内閣府が2025年3月に初めて公表した「孤立死」の推計数値と特徴は？",a:"2024年の孤立死は約2.1万人。約8割が男性。年齢別では70〜74歳が最多。",d:"孤立死の定義は「誰にも看取られず死後8日以上経過して発見された人」。警察庁の孤独死集計（自宅で亡くなった一人暮らし）では全国7.6万人。孤独・孤立対策推進法（2024年施行）では孤独・孤立を「社会全体の課題」と位置付けている。"},
+  {id:30,cat:"社会・法律",q:"内閣府が2025年3月に初めて公表した「孤立死」の推計数値と特徴は？",a:"2024年の孤立死は約2.1万人。約8割が男性。年齢別では70〜74歳が最多。",d:"孤立死の定義は「誰にも看取られず死後8日以上経過して発見された人」。孤独・孤立対策推進法（2024年施行）では孤独・孤立を「社会全体の課題」と位置付けている。"},
   {id:31,cat:"社会・法律",q:"2025年3月に政府が初めて示した富士山噴火対策指針の4ステージ基準を述べよ。",a:"ステージ4（30cm以上）→原則避難。ステージ3（3cm以上・被害大）→ライフライン遅延時は移動。ステージ2（3cm以上・被害小）→自宅生活継続。ステージ1（微量）→通常対応。",d:"経済被害は最大2.5兆円と推計。処理が必要な火山灰の量は東日本大震災の廃棄物の10倍とされた。"},
   {id:32,cat:"社会・法律",q:"2024年の刑法犯認知件数の動向と、特に増加が著しかった犯罪は？",a:"刑法犯認知件数は前年比約4.9%増の73.7万件で3年連続増加。SNS型投資・ロマンス詐欺の件数は前年比約2.6倍に急増し、詐欺被害額が前年比60%増の約4,000億円で過去最多。",d:"重要犯罪（強盗・殺人等）が18%増。不同意性交が45%増、不同意わいせつが14.7%増。詐欺の犯行動機としては「生活困窮」が40%で最多。"},
-  {id:33,cat:"国際情勢",q:"2025年10月に実現したイスラエル・ハマス間の動向を説明せよ。",a:"トランプ大統領の和平案を両者が受け入れ（10月3〜9日）、第一段階の和平合意が成立し人質交換が実現した（10月13日）。",d:"2023年10月から続いていたガザ紛争においてトランプ米大統領の仲介で停戦・和平合意の第一段階が成立。人質と囚人の交換が行われた。"},
+  {id:33,cat:"国際情勢",q:"2025年10月に実現したイスラエル・ハマス間の動向を説明せよ。",a:"トランプ大統領の和平案を両者が受け入れ（10月3〜9日）、第一段階の和平合意が成立し人質交換が実現した（10月13日）。",d:"2023年10月から続いていたガザ紛争においてトランプ米大統領の仲介で停戦・和平合意の第一段階が成立。"},
   {id:34,cat:"国際情勢",q:"2026年2〜3月の中東情勢の急変を時系列で述べよ。",a:"2月28日：米・イスラエルがイランへの軍事攻撃を開始、最高指導者ハメネイ師を殺害。3月1日：イランがホルムズ海峡を封鎖。3月9日：イランの新最高指導者にモジタバ・ハメネイ師が選出。",d:"ハメネイ師の死去を受けイランでは息子のモジタバ氏が最高指導者に選出。ホルムズ海峡封鎖は日本の原油輸入の約90%が通過するルートで、エネルギー安全保障上の直接的な脅威となった。"},
   {id:35,cat:"国際情勢",q:"ホルムズ海峡封鎖が日本に与えた影響と政府の対応は？",a:"ガソリン小売価格が1リットル190円台を突破（3月18日）。政府は石油備蓄の放出と価格抑制策を表明。高市首相は「自衛隊による機雷除去は想定していない」と答弁（3月12日）。",d:"ホルムズ海峡はペルシャ湾とオマーン湾をつなぐ幅の狭い海峡で世界の原油輸送量の約20%が通過する。"},
-  {id:36,cat:"国際情勢",q:"韓国の尹錫悦（ユン・ソンニョル）前大統領に対する判決は何か？",a:"2026年2月19日、無期懲役の判決が言い渡された。",d:"2024年12月に非常戒厳（戒厳令）を宣言し内乱罪で逮捕・起訴された。憲法裁判所は罷免を言い渡していた。韓国で現職大統領が逮捕されるのは史上初（大統領経験者の逮捕は5人目）。"},
-  {id:37,cat:"国際情勢",q:"2026年1〜2月のミラノ・コルティナ冬季五輪における日本の成績は？",a:"日本は過去最高の24枚のメダルを獲得した（2月22日時点）。",d:"イタリアのミラノとコルティナ・ダンペッツォを会場とする冬季オリンピック。冬季五輪での日本のメダル獲得数としては史上最多となった（※最終合計は確認推奨）。"},
+  {id:36,cat:"国際情勢",q:"韓国の尹錫悦（ユン・ソンニョル）前大統領に対する判決は何か？",a:"2026年2月19日、無期懲役の判決が言い渡された。",d:"2024年12月に非常戒厳（戒厳令）を宣言し内乱罪で逮捕・起訴された。憲法裁判所は罷免を言い渡していた。"},
+  {id:37,cat:"国際情勢",q:"2026年1〜2月のミラノ・コルティナ冬季五輪における日本の成績は？",a:"日本は過去最高の24枚のメダルを獲得した（2月22日時点）。",d:"イタリアのミラノとコルティナ・ダンペッツォを会場とする冬季オリンピック。冬季五輪での日本のメダル獲得数としては史上最多となった。"},
   {id:38,cat:"国際情勢",q:"2025年11月のG20首脳会議について述べよ。",a:"南アフリカで開催（アフリカ大陸での初のG20開催）。米国抜きで首脳宣言が採択された（11月22日）。",d:"トランプ大統領の欠席を受けながら残りの首脳が宣言を採択した（※米国不参加の詳細理由は未確認）。"},
-  {id:39,cat:"国際情勢",q:"2026年1月にトランプ大統領が行った国際機関に関する行動は？",a:"トランプ大統領が66の国際機関・条約からの脱退を発表した（2026年1月7日）。",d:"第二次トランプ政権（2025年1月就任）は第一次に続きパリ協定離脱・WHO脱退等を進め、さらに多数の国際機関・条約からの脱退を発表した。"},
+  {id:39,cat:"国際情勢",q:"2026年1月にトランプ大統領が行った国際機関に関する行動は？",a:"トランプ大統領が66の国際機関・条約からの脱退を発表した（2026年1月7日）。",d:"第二次トランプ政権（2025年1月就任）はパリ協定離脱・WHO脱退等を進め、さらに多数の国際機関・条約からの脱退を発表した。"},
   {id:40,cat:"国際情勢",q:"2026年5月の日ベトナム首脳会談で合意した内容と言及された枠組みは？",a:"経済安全保障分野での連携強化で合意。「自由で開かれたインド太平洋（FOIP）」の枠組みでの協力を確認した（5月2日）。",d:"FOIPとはFree and Open Indo-Pacific（自由で開かれたインド太平洋）の略。日本が主導する外交・安全保障の概念で中国への対抗を念頭にASEAN諸国との連携を重視している。"},
   {id:41,cat:"国際情勢",q:"2025年11月に高市首相が行った台湾有事に関する発言とその後の日中関係への影響は？",a:"「台湾有事の際に集団的自衛権を行使できる可能性がある」と答弁（11月10日）。これをきっかけに日中対立が本格化した（11月13日）。",d:"集団的自衛権とは同盟国が攻撃された際に自国が攻撃されていなくても共同して反撃できる権利。日本では2015年の安保関連法で限定的に行使可能となった。"},
   {id:42,cat:"科学・環境",q:"2025年のノーベル生理学・医学賞受賞者と受賞理由は？",a:"坂口志文（さかぐち・しもん）・大阪大学教授。受賞理由は制御性T細胞の発見。",d:"制御性T細胞（Treg細胞）とは免疫反応を抑制するはたらきをもつT細胞の一種。自己免疫疾患の治療やがん免疫療法などへの応用が期待されている。"},
   {id:43,cat:"科学・環境",q:"2025年のノーベル化学賞受賞者と受賞理由は？",a:"北川進（きたがわ・すすむ）・京都大学教授ほか。受賞理由は多孔性金属有機構造体（MOF）の研究。",d:"MOF（Metal-Organic Framework）とは金属イオンと有機配位子が規則正しく結合した多孔質材料。水素貯蔵・CO2回収・薬物送達などへの応用が研究されている。"},
-  {id:44,cat:"科学・環境",q:"2026年4月に発生した地震の規模・場所・気象庁の対応を述べよ。",a:"三陸沖でマグニチュード7.7の地震が発生（4月20日）。気象庁は「北海道・三陸沖後発地震注意情報」を発表した。",d:"後発地震注意情報とは大規模な地震発生後にさらに大きな地震が起こりやすい状況を知らせる情報制度（2022年運用開始）。東日本大震災15周年（2026年3月11日）の後の発生で防災意識が高まった。"},
+  {id:44,cat:"科学・環境",q:"2026年4月に発生した地震の規模・場所・気象庁の対応を述べよ。",a:"三陸沖でマグニチュード7.7の地震が発生（4月20日）。気象庁は「北海道・三陸沖後発地震注意情報」を発表した。",d:"後発地震注意情報とは大規模な地震発生後にさらに大きな地震が起こりやすい状況を知らせる情報制度（2022年運用開始）。"},
   {id:45,cat:"科学・環境",q:"エネルギー基本計画における原子力と再生可能エネルギーの2040年度の目標は？",a:"原発の割合を現在の1割未満から2040年度に2割程度に増加。再生可能エネルギーを現在の約23%から4〜5割に増やすことを目指す。",d:"2025年2月に策定。従来の「原発依存度を可能な限り低減する」方針を削除し、原発の建て替え（リプレース）を推進するとした。"},
   {id:46,cat:"科学・環境",q:"2023年度の温室効果ガス排出量に関する環境省の発表内容は？",a:"2023年度の国内温室効果ガス排出量が2年連続で減少し、1990年度以降で過去最少となった。産業・運輸・業務・家庭の全部門で排出が減少。",d:"政府は2035年度までに2013年度比60%削減し、2050年までにカーボンニュートラルを達成する目標を掲げている。"},
   {id:47,cat:"科学・環境",q:"錦織圭が現役引退を発表した時期と代表的な実績は？",a:"2026年5月1日に現役引退を発表。2015年にアジア人史上初の世界ランキング4位を記録。",d:"現役引退時点で36歳。怪我が相次ぎ世界ランキングは400位台まで低下。2014年全米オープン準優勝（グランドスラムでのアジア人最高成績）が代表的な実績。"},
   {id:48,cat:"科学・環境",q:"2026年4月に実施されたNASAのアルテミス計画について述べよ。",a:"有人月探査船の打ち上げが成功し（4月2日）、有人探査の最遠距離を更新。4月11日に地球へ帰還した。",d:"アルテミス計画は米国主導の有人月面探査計画。日本のJAXAも参加しており、将来的には日本人宇宙飛行士の月面着陸も目指している。"}
 ];
 
-// ── ユーティリティ ──────────────────────────────────────────────────────────
 const CATS = ["全問","国内政治","経済・産業","社会・法律","国際情勢","科学・環境"];
-function sf(...styles){return Object.assign({},...styles);}
-function ss(tag,style,...children){return e(tag,{style:style},...children);}
 
-// ── Badge ────────────────────────────────────────────────────────────────────
+// ── Badge ─────────────────────────────────────────────────────────────────────
 function Badge({cat}){
   const color=C.cat[cat]||C.accent;
   return e('span',{style:{fontSize:10,fontWeight:700,letterSpacing:"0.08em",
@@ -108,38 +196,65 @@ function Badge({cat}){
     flexShrink:0,whiteSpace:"nowrap"}},cat);
 }
 
-// ── ProgressBar ──────────────────────────────────────────────────────────────
+// ── ProgressBar ───────────────────────────────────────────────────────────────
 function ProgressBar({done,total}){
   const p=total>0?Math.round(done/total*100):0;
   return e('div',null,
     e('div',{style:{display:"flex",justifyContent:"space-between",fontSize:11,color:C.muted,marginBottom:5}},
-      e('span',null,"進捗"),
-      e('span',null,done+"/"+total+"問 ("+p+"%)")
-    ),
+      e('span',null,"進捗"),e('span',null,done+"/"+total+"問 ("+p+"%)") ),
     e('div',{style:{height:3,background:C.border,borderRadius:2,overflow:"hidden"}},
       e('div',{style:{height:"100%",width:p+"%",borderRadius:2,
-        background:"linear-gradient(90deg,"+C.accentDim+","+C.accent+")",
-        transition:"width 0.3s ease"}})
-    )
+        background:"linear-gradient(90deg,"+C.accentDim+","+C.accent+")",transition:"width 0.3s ease"}}))
   );
 }
 
-// ── App ──────────────────────────────────────────────────────────────────────
+// ── SpeakBtn（読み上げボタン）────────────────────────────────────────────────
+function SpeakBtn({text, soundOn}){
+  const [active,setActive]=useState(false);
+  function toggle(ev){
+    ev.stopPropagation();
+    if(!soundOn) return;
+    if(active){ stopSpeak(); setActive(false); return; }
+    setActive(true);
+    speak(text, null, ()=>setActive(false));
+  }
+  return e('button',{
+    onClick:toggle,
+    title: soundOn ? "読み上げ" : "音声OFF",
+    style:{
+      display:"inline-flex",alignItems:"center",gap:5,
+      padding:"5px 12px",borderRadius:6,fontSize:12,
+      cursor: soundOn ? "pointer":"default",
+      fontFamily:"inherit",marginTop:14,
+      border:"1px solid "+(active?C.blue:C.border),
+      background: active?C.blue+"22":"transparent",
+      color: active?C.blue: soundOn?C.muted:C.dim,
+      opacity: soundOn?1:0.4
+    }
+  },
+    e('span',{className: active?"speaking":"", style:{fontSize:14}}, active?"■":"▶"),
+    active?"停止":"読み上げ"
+  );
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
 function App(){
-  const [cat,setCat]=useState("全問");
-  const [idx,setIdx]=useState(0);
-  const [flipped,setFlipped]=useState(false);
-  const [detail,setDetail]=useState(false);
-  const [mode,setMode]=useState("study");
-  const [saveMsg,setSaveMsg]=useState("");
-  const [done,setDone]=useState(()=>loadDone());
+  const [cat,setCat]       = useState("全問");
+  const [idx,setIdx]       = useState(0);
+  const [flipped,setFlipped] = useState(false);
+  const [detail,setDetail] = useState(false);
+  const [mode,setMode]     = useState("study");
+  const [saveMsg,setSaveMsg] = useState("");
+  const [done,setDone]     = useState(()=>loadDone());
+  const [soundOn,setSoundOn] = useState(true);   // 効果音 ON/OFF
+  const [ttsOn,setTtsOn]   = useState(true);     // 読み上げ ON/OFF
 
-  const qs=cat==="全問"?QS:QS.filter(q=>q.cat===cat);
-  const si=Math.min(idx,qs.length-1);
-  const cur=qs[si];
-  const doneCat=qs.filter(q=>done.has(q.id)).length;
+  const qs  = cat==="全問"?QS:QS.filter(q=>q.cat===cat);
+  const si  = Math.min(idx,qs.length-1);
+  const cur = qs[si];
+  const doneCat = qs.filter(q=>done.has(q.id)).length;
 
-  // 自動保存
+  // 保存
   useEffect(()=>{
     if(done.size===0)return;
     saveDone(done);
@@ -148,18 +263,46 @@ function App(){
     return()=>clearTimeout(t);
   },[done]);
 
+  // カテゴリ変更時に読み上げ停止
+  useEffect(()=>{ stopSpeak(); },[cat,idx]);
+
   function go(dir){
-    setFlipped(false);setDetail(false);
+    if(soundOn) playClick();
+    stopSpeak();
+    setFlipped(false); setDetail(false);
     setIdx(i=>{const n=qs.length;return((i+dir)%n+n)%n;});
   }
+
   function flip(){
-    if(!flipped){setDone(prev=>{const nx=new Set(prev);nx.add(cur.id);saveDone(nx);return nx;});}
-    setFlipped(f=>!f);setDetail(false);
+    if(!flipped){
+      if(soundOn) playFlip();
+      setDone(prev=>{const nx=new Set(prev);nx.add(cur.id);saveDone(nx);return nx;});
+      // 答えを自動読み上げ
+      if(ttsOn) setTimeout(()=>speak(cur.a),200);
+    } else {
+      stopSpeak();
+    }
+    setFlipped(f=>!f); setDetail(false);
   }
-  function selectCat(c){setCat(c);setIdx(0);setFlipped(false);setDetail(false);}
-  function jumpTo(i){setIdx(i);setFlipped(false);setDetail(false);setMode("study");}
+
+  function selectCat(c){ stopSpeak(); setCat(c);setIdx(0);setFlipped(false);setDetail(false); }
+  function jumpTo(i){ stopSpeak(); setIdx(i);setFlipped(false);setDetail(false);setMode("study"); }
+
+  function toggleSound(){
+    const next=!soundOn;
+    setSoundOn(next);
+    if(!next){ stopSpeak(); }
+    else { playClick(); }
+  }
+  function toggleTts(){
+    const next=!ttsOn;
+    setTtsOn(next);
+    if(!next) stopSpeak();
+  }
+
   function reset(){
     if(!confirm("進捗をリセットしますか？\n確認済みの記録がすべて消えます。"))return;
+    stopSpeak();
     setDone(new Set());try{localStorage.removeItem(KEY);}catch{}
     setSaveMsg("リセットしました");
     setTimeout(()=>setSaveMsg(""),2000);
@@ -168,28 +311,52 @@ function App(){
   const safeTop="env(safe-area-inset-top,0px)";
   const safeBot="env(safe-area-inset-bottom,0px)";
 
+  // ── アイコン文字
+  const soundIcon = soundOn ? "♪" : "♪̶";
+  const ttsIcon   = ttsOn   ? "▶" : "▶̶";
+
   return e('div',{style:{minHeight:"100vh",background:C.bg,color:C.text,
     fontFamily:"'Hiragino Mincho ProN','Yu Mincho',Georgia,serif",
     paddingBottom:"calc(48px + "+safeBot+")"}},
 
     // ── ヘッダー
     e('div',{style:{background:C.card,borderBottom:"1px solid "+C.border,
-      padding:"calc(16px + "+safeTop+") 20px 14px",position:"sticky",top:0,zIndex:10}},
+      padding:"calc(14px + "+safeTop+") 20px 12px",position:"sticky",top:0,zIndex:10}},
       e('div',{style:{fontSize:10,letterSpacing:"0.15em",color:C.accentDim,fontFamily:"monospace",marginBottom:2}},
         "特別区経験者採用試験"),
-      e('div',{style:{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}},
+      e('div',{style:{display:"flex",justifyContent:"space-between",alignItems:"center"}},
         e('div',null,
-          e('div',{style:{fontSize:17,fontWeight:700,letterSpacing:"0.03em"}},"時事対策 暗記問題集"),
-          e('div',{style:{fontSize:10,color:C.dim,marginTop:2}},
+          e('div',{style:{fontSize:16,fontWeight:700,letterSpacing:"0.03em"}},"時事対策 暗記問題集"),
+          e('div',{style:{fontSize:10,color:C.dim,marginTop:1}},
             "令和7年10月 ─ 令和8年5月　全"+QS.length+"問")
         ),
-        e('div',{style:{fontSize:11,padding:"4px 10px",borderRadius:6,flexShrink:0,marginTop:2,
-          color:saveMsg?"✓"===saveMsg[0]?C.green:C.muted:C.dim,
-          background:saveMsg?"✓"===saveMsg[0]?C.green+"18":C.muted+"18":C.border,
-          border:"1px solid "+(saveMsg?"✓"===saveMsg[0]?C.green+"44":C.border:C.border)}},
-          saveMsg||"自動保存")
+        // 音声コントロール + 保存表示
+        e('div',{style:{display:"flex",gap:6,alignItems:"center",flexShrink:0}},
+          // 効果音ボタン
+          e('button',{onClick:toggleSound,title:"効果音 ON/OFF",style:{
+            width:36,height:36,borderRadius:8,border:"1px solid "+C.border,
+            background:soundOn?C.accent+"18":"transparent",
+            color:soundOn?C.accent:C.dim,fontSize:16,cursor:"pointer",
+            display:"flex",alignItems:"center",justifyContent:"center"
+          }}, soundOn ? "♪" : "♪"),
+          // 読み上げボタン
+          e('button',{onClick:toggleTts,title:"読み上げ ON/OFF",style:{
+            width:36,height:36,borderRadius:8,border:"1px solid "+C.border,
+            background:ttsOn?C.blue+"18":"transparent",
+            color:ttsOn?C.blue:C.dim,fontSize:14,cursor:"pointer",
+            display:"flex",alignItems:"center",justifyContent:"center",fontWeight:"bold"
+          }}, "読"),
+          // 保存表示
+          e('div',{style:{fontSize:10,padding:"3px 8px",borderRadius:6,
+            color:saveMsg?C.green:C.dim,
+            background:saveMsg?C.green+"18":C.border,
+            border:"1px solid "+(saveMsg?C.green+"44":C.border),
+            whiteSpace:"nowrap"}},
+            saveMsg||"自動保存")
+        )
       ),
-      e('div',{style:{display:"flex",gap:8,marginTop:12}},
+      // モード切替 + リセット
+      e('div',{style:{display:"flex",gap:8,marginTop:10}},
         e('button',{onClick:()=>setMode("study"),style:{padding:"5px 14px",borderRadius:6,fontSize:12,
           cursor:"pointer",fontFamily:"inherit",
           border:"1px solid "+(mode==="study"?C.accent:C.border),
@@ -206,14 +373,27 @@ function App(){
       )
     ),
 
+    // ── 音声状態バー
+    e('div',{style:{
+      display:"flex",gap:6,padding:"6px 20px",
+      background:C.card,borderBottom:"1px solid "+C.border,
+      fontSize:10,color:C.dim
+    }},
+      e('span',null,"効果音: "),
+      e('span',{style:{color:soundOn?C.accent:C.dim,fontWeight:700}},soundOn?"ON":"OFF"),
+      e('span',{style:{margin:"0 8px",color:C.border}},"|"),
+      e('span',null,"読み上げ: "),
+      e('span',{style:{color:ttsOn?C.blue:C.dim,fontWeight:700}},ttsOn?"ON（答えを自動読み上げ）":"OFF"),
+    ),
+
     // ── カテゴリタブ
-    e('div',{style:{display:"flex",gap:6,padding:"12px 20px",overflowX:"auto",
+    e('div',{style:{display:"flex",gap:6,padding:"10px 20px",overflowX:"auto",
       borderBottom:"1px solid "+C.border,WebkitOverflowScrolling:"touch"}},
       CATS.map(c=>{
         const color=c==="全問"?C.accent:(C.cat[c]||C.accent);
         return e('button',{key:c,onClick:()=>selectCat(c),
-          style:{flexShrink:0,padding:"5px 12px",borderRadius:20,fontSize:11,
-            fontWeight:700,letterSpacing:"0.05em",cursor:"pointer",fontFamily:"inherit",
+          style:{flexShrink:0,padding:"5px 12px",borderRadius:20,
+            fontSize:11,fontWeight:700,letterSpacing:"0.05em",cursor:"pointer",fontFamily:"inherit",
             border:"1px solid "+(cat===c?color:C.border),
             background:cat===c?color+"20":"transparent",
             color:cat===c?color:C.muted}},c);
@@ -222,13 +402,13 @@ function App(){
 
     // ── コンテンツ
     e('div',{style:{padding:"0 20px"}},
-      e('div',{style:{paddingTop:16,paddingBottom:4}},
+      e('div',{style:{paddingTop:14,paddingBottom:4}},
         e(ProgressBar,{done:doneCat,total:qs.length})
       ),
 
-      // カード学習
+      // ─ カード学習 ─
       mode==="study"&&cur&&e('div',null,
-        e('div',{style:{display:"flex",justifyContent:"space-between",alignItems:"center",margin:"12px 0"}},
+        e('div',{style:{display:"flex",justifyContent:"space-between",alignItems:"center",margin:"10px 0"}},
           e('div',{style:{display:"flex",alignItems:"center",gap:8}},
             e('span',{style:{fontSize:13,color:C.muted}},"Q"+(si+1)+" / "+qs.length),
             e(Badge,{cat:cur.cat})
@@ -237,56 +417,76 @@ function App(){
             done.has(cur.id)?"✓ 確認済":"未確認")
         ),
 
-        // カード本体
-        e('div',{onClick:flip,style:{background:C.card,borderRadius:12,padding:"24px 20px",
-          cursor:"pointer",minHeight:180,
-          border:"1px solid "+(flipped?C.accentDim:C.border),
-          transition:"border-color 0.2s",marginBottom:12,userSelect:"none",WebkitUserSelect:"none"}},
-          !flipped
-            ?e('div',null,
-                e('div',{style:{fontSize:10,letterSpacing:"0.12em",color:C.accentDim,
-                  marginBottom:14,fontFamily:"monospace"}},"QUESTION — タップして答えを見る"),
-                e('div',{style:{fontSize:15,lineHeight:1.85,fontWeight:600}},cur.q)
+        // カード
+        e('div',{onClick:flip,style:{
+          background:C.card,borderRadius:12,padding:"22px 20px",cursor:"pointer",
+          minHeight:176,border:"1px solid "+(flipped?C.accentDim:C.border),
+          transition:"border-color 0.2s",marginBottom:12,
+          userSelect:"none",WebkitUserSelect:"none"}},
+
+          !flipped ? e('div',null,
+            e('div',{style:{fontSize:10,letterSpacing:"0.12em",color:C.accentDim,
+              marginBottom:12,fontFamily:"monospace"}},"QUESTION — タップして答えを見る"),
+            e('div',{style:{fontSize:15,lineHeight:1.85,fontWeight:600}},cur.q),
+            // 問題の読み上げボタン
+            e(SpeakBtn,{text:cur.q,soundOn:ttsOn})
+          )
+          : e('div',null,
+            e('div',{style:{fontSize:10,letterSpacing:"0.12em",color:C.green,
+              marginBottom:12,fontFamily:"monospace"}},"ANSWER"),
+            e('div',{style:{fontSize:14,lineHeight:1.9}},cur.a),
+            // 答えの読み上げボタン
+            e(SpeakBtn,{text:cur.a,soundOn:ttsOn}),
+            // 解説
+            e('div',{style:{marginTop:14,paddingTop:12,borderTop:"1px dashed "+C.border}},
+              e('button',{
+                onClick:function(ev){ev.stopPropagation();setDetail(function(d){const next=!d;if(next&&ttsOn){setTimeout(function(){speak(cur.d);},100);}else{stopSpeak();}return next;});},
+                style:{background:"transparent",border:"1px solid "+C.border,
+                  color:C.muted,fontSize:11,padding:"5px 12px",borderRadius:6,
+                  cursor:"pointer",fontFamily:"inherit"}},
+                detail?"解説を閉じる ▲":"解説を見る ▼"),
+              detail&&e('div',null,
+                e('div',{style:{marginTop:12,fontSize:12,lineHeight:1.9,
+                  color:C.muted,padding:"14px",background:C.bg+"cc",
+                  borderRadius:8,border:"1px solid "+C.border}},cur.d),
+                e(SpeakBtn,{text:cur.d,soundOn:ttsOn})
               )
-            :e('div',null,
-                e('div',{style:{fontSize:10,letterSpacing:"0.12em",color:C.green,
-                  marginBottom:14,fontFamily:"monospace"}},"ANSWER"),
-                e('div',{style:{fontSize:14,lineHeight:1.9}},cur.a),
-                e('div',{style:{marginTop:16,paddingTop:14,borderTop:"1px dashed "+C.border}},
-                  e('button',{
-                    onClick:function(ev){ev.stopPropagation();setDetail(d=>!d);},
-                    style:{background:"transparent",border:"1px solid "+C.border,
-                      color:C.muted,fontSize:11,padding:"5px 12px",borderRadius:6,
-                      cursor:"pointer",fontFamily:"inherit"}},
-                    detail?"解説を閉じる ▲":"解説を見る ▼"),
-                  detail&&e('div',{style:{marginTop:12,fontSize:12,lineHeight:1.9,
-                    color:C.muted,padding:"14px",background:C.bg+"cc",
-                    borderRadius:8,border:"1px solid "+C.border}},cur.d)
-                )
-              )
+            )
+          )
         ),
 
-        // ナビボタン
+        // ナビ
         e('div',{style:{display:"flex",gap:8}},
-          e('button',{onClick:()=>go(-1),style:{flex:1,padding:"14px",borderRadius:10,
+          e('button',{onClick:()=>go(-1),style:{flex:1,padding:"13px",borderRadius:10,
             border:"1px solid "+C.border,background:"transparent",color:C.muted,
             fontSize:14,cursor:"pointer",fontFamily:"inherit"}},"← 前へ"),
-          e('button',{onClick:flip,style:{flex:2,padding:"14px",borderRadius:10,
+          e('button',{onClick:flip,style:{flex:2,padding:"13px",borderRadius:10,
             border:"1px solid "+(flipped?C.accentDim:C.accent),
             background:(flipped?C.accentDim:C.accent)+"18",
             color:flipped?C.accentDim:C.accent,
             fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}},
             flipped?"問題に戻る":"答えを見る"),
-          e('button',{onClick:()=>go(1),style:{flex:1,padding:"14px",borderRadius:10,
+          e('button',{onClick:()=>go(1),style:{flex:1,padding:"13px",borderRadius:10,
             border:"1px solid "+C.border,background:"transparent",color:C.muted,
             fontSize:14,cursor:"pointer",fontFamily:"inherit"}},"次へ →")
-        )
+        ),
+
+        // 確認済ボタン（未確認の場合のみ表示）
+        !done.has(cur.id)&&flipped&&e('button',{
+          onClick:function(ev){
+            ev.stopPropagation();
+            if(soundOn) playDing();
+            setDone(prev=>{const nx=new Set(prev);nx.add(cur.id);saveDone(nx);return nx;});
+          },
+          style:{width:"100%",marginTop:8,padding:"12px",borderRadius:10,
+            border:"1px solid "+C.green+"44",background:C.green+"14",
+            color:C.green,fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}
+        },"✓ 確認済みにする")
       ),
 
-      // 問題一覧
+      // ─ 問題一覧 ─
       mode==="list"&&e('div',{style:{paddingTop:12}},
-        e('div',{style:{fontSize:11,color:C.dim,marginBottom:12}},
-          "問題をタップするとカード学習に移動します"),
+        e('div',{style:{fontSize:11,color:C.dim,marginBottom:12}},"問題をタップするとカード学習に移動します"),
         qs.map((q,i)=>
           e('div',{key:q.id,onClick:()=>jumpTo(i),
             style:{background:C.card,borderRadius:8,padding:"12px 14px",marginBottom:8,
@@ -305,7 +505,6 @@ function App(){
   );
 }
 
-// ── マウント ─────────────────────────────────────────────────────────────────
 ReactDOM.createRoot(document.getElementById("root")).render(e(App,null));
 </script>
 <script>
